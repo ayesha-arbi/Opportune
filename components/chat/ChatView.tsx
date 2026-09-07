@@ -2,15 +2,66 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUp, PanelLeft, Sparkles } from "lucide-react";
+import { ArrowUp, Check, Copy, PanelLeft, Sparkles } from "lucide-react";
 import { authHeader } from "@/lib/supabase/client";
 import { ChatSidebar, type ConversationSummary } from "@/components/chat/ChatSidebar";
+import { Markdown } from "@/components/chat/Markdown";
 import { OpportunityCard } from "@/components/opportunities/OpportunityCard";
 import type { Opportunity, TrackerStatus } from "@/types/database";
 
 type ThreadItem =
-  | { kind: "text"; role: "user" | "assistant"; content: string }
+  | { kind: "text"; role: "user" | "assistant"; content: string; tools?: string[] }
   | { kind: "opportunities"; items: Opportunity[] };
+
+const ACTIVITY_LABELS = [
+  "Searching opportunities…",
+  "Analyzing your request…",
+  "Finding the best matches…",
+  "Ranking matches…",
+];
+
+const TOOL_LABELS: Record<string, string> = {
+  search_opportunities: "Searched the database",
+  web_browse_opportunities: "Browsed the web",
+  update_tracker_status: "Updated your tracker",
+};
+
+/** Copy button + tool-activity trail under an assistant reply. */
+function MessageMeta({ tools, content }: { tools?: string[]; content: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable (permissions) — silently ignore.
+    }
+  };
+
+  const toolText = tools?.length
+    ? tools.map((tool) => TOOL_LABELS[tool] ?? tool).join(" · ")
+    : null;
+
+  return (
+    <div className="mt-2 flex items-center gap-2.5">
+      {toolText ? (
+        <span className="text-xs text-text-muted">{toolText}</span>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => void copy()}
+        title="Copy reply"
+        aria-label="Copy reply"
+        className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-colors duration-150 hover:bg-surface-soft hover:text-text-primary"
+      >
+        {copied ? <Check size={13} strokeWidth={2} /> : <Copy size={13} strokeWidth={1.5} />}
+      </button>
+      {copied ? <span className="text-xs text-text-muted">Copied</span> : null}
+    </div>
+  );
+}
 
 const SUGGESTIONS = [
   "Find AI hackathons I can join this month",
@@ -48,6 +99,18 @@ export function ChatView({
       setSidebarOpen(false);
     }
   }, []);
+
+  // Sequential staged activity labels while the assistant works.
+  useEffect(() => {
+    if (!pending) return;
+    let index = 0;
+    setLoadingMessage(ACTIVITY_LABELS[0]);
+    const timer = setInterval(() => {
+      index = (index + 1) % ACTIVITY_LABELS.length;
+      setLoadingMessage(ACTIVITY_LABELS[index]);
+    }, 2200);
+    return () => clearInterval(timer);
+  }, [pending]);
 
   const adjustHeight = () => {
     const el = textareaRef.current;
@@ -90,12 +153,11 @@ export function ChatView({
     setError(null);
     setInput("");
     setPending(true);
-    setLoadingMessage("Searching opportunities…");
     setThread((current) => [
       ...current,
       { kind: "text", role: "user", content: trimmed },
     ]);
-    
+
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -114,16 +176,6 @@ export function ChatView({
             : {}),
         }),
       });
-      
-      // Update loading message based on response timing
-      const startTime = Date.now();
-      const loadingUpdate = setTimeout(() => {
-        setLoadingMessage("Analyzing your request…");
-      }, 1000);
-      
-      const loadingUpdate2 = setTimeout(() => {
-        setLoadingMessage("Finding the best matches…");
-      }, 2500);
 
       const body = (await response.json().catch(() => null)) as {
         reply?: string;
@@ -133,9 +185,6 @@ export function ChatView({
         error?: string;
       } | null;
 
-      clearTimeout(loadingUpdate);
-      clearTimeout(loadingUpdate2);
-
       if (!response.ok || !body?.reply) {
         throw new Error(
           body?.error ?? "The assistant didn't respond — try again.",
@@ -144,7 +193,12 @@ export function ChatView({
 
       setThread((current) => [
         ...current,
-        { kind: "text", role: "assistant", content: body.reply! },
+        {
+          kind: "text",
+          role: "assistant",
+          content: body.reply!,
+          tools: body.toolsUsed?.length ? body.toolsUsed : undefined,
+        },
         ...(body.opportunities?.length
           ? [{ kind: "opportunities" as const, items: body.opportunities! }]
           : []),
@@ -166,7 +220,6 @@ export function ChatView({
       );
     } finally {
       setPending(false);
-      setLoadingMessage("Searching…");
     }
   };
 
@@ -227,9 +280,12 @@ export function ChatView({
                     <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-soft">
                       <Sparkles size={14} strokeWidth={1.5} className="text-accent-dark" />
                     </span>
-                    <p className="text-[15px] leading-relaxed text-text-secondary whitespace-pre-wrap">
-                      {item.content}
-                    </p>
+                    <div className="min-w-0">
+                      <div className="text-[15px] leading-relaxed text-text-secondary [&>*:first-child]:mt-0">
+                        <Markdown>{item.content}</Markdown>
+                      </div>
+                      <MessageMeta tools={item.tools} content={item.content} />
+                    </div>
                   </div>
                 )
               ) : (

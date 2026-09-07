@@ -28,20 +28,20 @@ def main():
     youth_config = SOURCES["youth_opportunities"]
     fully_funded_config = SOURCES["fully_funded_scholarships"]
 
-    def scrape_corners():
-        return scrape_wordpress_source(corners_config)
-    
-    def scrape_circle():
-        return scrape_wordpress_source(circle_config)
-    
-    def scrape_scholarships():
-        return scrape_wordpress_source(scholarships_config)
-    
-    def scrape_youth():
-        return scrape_wordpress_source(youth_config)
-    
-    def scrape_fully_funded():
-        return scrape_wordpress_source(fully_funded_config)
+    def scrape_corners(limit=None):
+        return scrape_wordpress_source(corners_config, limit=limit)
+
+    def scrape_circle(limit=None):
+        return scrape_wordpress_source(circle_config, limit=limit)
+
+    def scrape_scholarships(limit=None):
+        return scrape_wordpress_source(scholarships_config, limit=limit)
+
+    def scrape_youth(limit=None):
+        return scrape_wordpress_source(youth_config, limit=limit)
+
+    def scrape_fully_funded(limit=None):
+        return scrape_wordpress_source(fully_funded_config, limit=limit)
 
     sources = [
         {"name": "Devpost", "fn": scrape_devpost},
@@ -55,7 +55,7 @@ def main():
 
     # Add agentic crawler if enabled
     if run_agentic:
-        def run_agentic_wrapper():
+        def run_agentic_wrapper(limit=None):
             opportunities = run_agentic_crawler()
             # Convert dict returns to OpportunityExtracted objects
             from scraper.schema import OpportunityExtracted

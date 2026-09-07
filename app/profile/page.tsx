@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createServerUserClient } from "@/lib/supabase/server";
 import { AppShell } from "@/components/common/AppShell";
+import { NotificationSettings } from "@/components/profile/NotificationSettings";
 import {
   educationLabel,
   goalTypeLabel,
@@ -215,6 +216,13 @@ export default async function ProfilePage() {
                 </span>
               </div>
             </div>
+          </Tile>
+
+          <Tile label="Notifications" className="md:col-span-2 lg:col-span-3">
+            <NotificationSettings
+              initialDaysBefore={profile.reminder_days_before ?? 3}
+              initialDigest={profile.digest_frequency ?? "weekly"}
+            />
           </Tile>
 
           <Tile label="Goals" className="md:col-span-2 lg:col-span-4">

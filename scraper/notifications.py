@@ -113,9 +113,34 @@ def send_new_opportunities_alert(user_email: str, opportunities: List[Dict[str, 
         return False
     
     subject = f"🎯 {len(opportunities)} New Opportunities Match Your Profile"
-    
+
     interests_text = ", ".join(user_interests[:3]) if user_interests else "your interests"
-    
+
+    opportunity_rows = ""
+    for opp in opportunities:
+        row = f"""
+                <div class="opportunity">
+                    <h3>{opp.get('title', 'Unknown Opportunity')}</h3>
+                    <p><strong>Type:</strong> {opp.get('type', 'Other')}</p>
+                    <p class="tags"><strong>Tags:</strong> {', '.join(opp.get('field_tags', []))}</p>"""
+        if opp.get('deadline'):
+            row += f"""
+                    <p><strong>Deadline:</strong> {opp['deadline']}</p>"""
+        if opp.get('organizer'):
+            row += f"""
+                    <p><strong>Organizer:</strong> {opp['organizer']}</p>"""
+        if opp.get('location'):
+            row += f"""
+                    <p><strong>Location:</strong> {opp['location']}</p>"""
+        link = opp.get('application_url') or opp.get('source_url')
+        if link:
+            label = "Apply Now" if opp.get('application_url') else "View Details"
+            row += f"""
+                    <a href="{link}" class="cta">{label}</a>"""
+        row += """
+                </div>"""
+        opportunity_rows += row
+
     html_content = f"""
     <html>
     <head>
@@ -137,20 +162,9 @@ def send_new_opportunities_alert(user_email: str, opportunities: List[Dict[str, 
             <div class="content">
                 <p>Hello,</p>
                 <p>We found {len(opportunities)} new opportunities matching {interests_text}:</p>
-                
-                {"".join([f"""
-                <div class="opportunity">
-                    <h3>{opp.get('title', 'Unknown Opportunity')}</h3>
-                    <p><strong>Type:</strong> {opp.get('type', 'Other')}</p>
-                    <p class="tags"><strong>Tags:</strong> {', '.join(opp.get('field_tags', []))}</p>
-                    {opp.get('deadline') and f"<p><strong>Deadline:</strong> {opp.get('deadline')}</p>"}
-                    {opp.get('organizer') and f"<p><strong>Organizer:</strong> {opp.get('organizer')}</p>"}
-                    {opp.get('location') and f"<p><strong>Location:</strong> {opp.get('location')}</p>"}
-                    {opp.get('application_url') and f"<a href=\"{opp.get('application_url')}\" class=\"cta">Apply Now</a>"}
-                    {opp.get('source_url') and not opp.get('application_url') and f"<a href=\"{opp.get('source_url')}\" class=\"cta\">View Details</a>"}
-                </div>
-                """ for opp in opportunities])}
-                
+
+                {opportunity_rows}
+
                 <p>Check your Opportune dashboard to save these opportunities to your tracker!</p>
                 <p>Best,<br>The Opportune Team</p>
             </div>

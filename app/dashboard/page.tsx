@@ -4,7 +4,13 @@ import { createServerUserClient } from "@/lib/supabase/server";
 import { AppShell } from "@/components/common/AppShell";
 import { DateStamp } from "@/components/common/DateStamp";
 import { OpportunityCard } from "@/components/opportunities/OpportunityCard";
-import type { Opportunity, TrackerStatus } from "@/types/database";
+import {
+  embedText,
+  EMBEDDING_MODEL,
+  embeddingsConfigured,
+  profileEmbeddingText,
+} from "@/lib/ai/embeddings";
+import type { Opportunity, Profile, TrackerStatus } from "@/types/database";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +34,84 @@ function EmptyNote({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Embed the profile for semantic recommendations, computed lazily on first
+ * dashboard load and refreshed when the profile changes. Runs under the
+ * user's session (RLS allows updating their own row). Returns null when
+ * embeddings aren't configured — callers fall back to tag matching.
+ */
+async function ensureProfileEmbedding(
+  supabase: Awaited<ReturnType<typeof createServerUserClient>>,
+  profile: Profile,
+): Promise<string | null> {
+  if (!embeddingsConfigured()) return null;
+
+  // The update trigger bumps updated_at, so allow a few seconds of clock skew
+  // before treating the embedding as stale.
+  const stale =
+    !profile.embedding_updated_at ||
+    new Date(profile.updated_at).getTime() -
+      new Date(profile.embedding_updated_at).getTime() >
+      5000;
+
+  if (profile.embedding && profile.embedding_model === EMBEDDING_MODEL && !stale) {
+    return profile.embedding;
+  }
+
+  try {
+    const embedding = await embedText(profileEmbeddingText(profile));
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        embedding,
+        embedding_model: EMBEDDING_MODEL,
+        embedding_updated_at: new Date().toISOString(),
+      })
+      .eq("id", profile.id);
+    if (error) {
+      console.warn("[dashboard] could not persist profile embedding:", error.message);
+    }
+    return embedding;
+  } catch (error) {
+    console.warn("[dashboard] profile embedding failed:", error);
+    return null;
+  }
+}
+
+async function getSemanticRecommended(
+  supabase: Awaited<ReturnType<typeof createServerUserClient>>,
+  profileEmbedding: string,
+  trackedIds: Set<string>,
+): Promise<Opportunity[]> {
+  const { data: matches, error } = await supabase.rpc("match_opportunities", {
+    query_embedding: profileEmbedding,
+    match_count: 8,
+  });
+  if (error) throw new Error(error.message);
+
+  const nowMs = Date.now();
+  const ids = (matches ?? [])
+    .map((match) => match.id)
+    .filter((id) => !trackedIds.has(id));
+  if (ids.length === 0) return [];
+
+  const { data, error: fetchError } = await supabase
+    .from("opportunities")
+    .select("*")
+    .in("id", ids);
+  if (fetchError) throw new Error(fetchError.message);
+
+  const byId = new Map(((data ?? []) as Opportunity[]).map((row) => [row.id, row]));
+  return ids
+    .map((id) => byId.get(id))
+    .filter(
+      (row): row is Opportunity =>
+        Boolean(row) &&
+        (!row!.deadline || new Date(row!.deadline).getTime() >= nowMs),
+    )
+    .slice(0, 4);
+}
+
 export default async function DashboardPage() {
   // If Supabase isn't configured (or the session can't be read), fall back
   // to the login gate instead of a 500.
@@ -48,22 +132,12 @@ export default async function DashboardPage() {
   const nowIso = new Date().toISOString();
   const interests = profile.interests ?? [];
 
-  const [trackedResult, recommendedResult, recentResult] = await Promise.all([
+  const [trackedResult, recentResult] = await Promise.all([
     supabase
       .from("user_opportunities")
       .select("id, status, opportunity:opportunities(*)")
       .eq("user_id", user.id)
       .order("updated_at", { ascending: false }),
-    interests.length
-      ? supabase
-          .from("opportunities")
-          .select("*")
-          .eq("is_active", true)
-          .overlaps("field_tags", interests)
-          .gte("deadline", nowIso)
-          .order("deadline", { ascending: true })
-          .limit(4)
-      : Promise.resolve({ data: [], error: null }),
     supabase
       .from("opportunities")
       .select("*")
@@ -74,7 +148,8 @@ export default async function DashboardPage() {
 
   // Upcoming deadlines: filter the joined rows in JS (the user's own rows
   // are few) instead of using embedded-resource filters.
-  const upcoming = ((trackedResult.data ?? []) as TrackedRow[])
+  const trackedRows = (trackedResult.data ?? []) as TrackedRow[];
+  const upcoming = trackedRows
     .flatMap((row) => {
       const deadline = row.opportunity?.deadline;
       if (!deadline || new Date(deadline).getTime() < Date.now()) return [];
@@ -90,11 +165,53 @@ export default async function DashboardPage() {
     .sort((a, b) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime())
     .slice(0, 5);
 
-  const recommended = (recommendedResult.data ?? []) as Opportunity[];
+  const trackedIds = new Set(
+    trackedRows
+      .filter((row) => row.opportunity)
+      .map((row) => row.opportunity!.id),
+  );
+
+  // Recommendations: semantic ranking first, tag match as fallback. Both
+  // exclude opportunities already in the tracker; the tag fallback is
+  // weighted by nearest deadline (ordered by deadline ascending).
+  let recommended: Opportunity[] = [];
+  let recommendedBy = "";
+
+  const profileEmbedding = await ensureProfileEmbedding(supabase, profile);
+  if (profileEmbedding) {
+    try {
+      recommended = await getSemanticRecommended(
+        supabase,
+        profileEmbedding,
+        trackedIds,
+      );
+      if (recommended.length > 0) recommendedBy = "Matched to your profile";
+    } catch (error) {
+      console.warn("[dashboard] semantic recommendations failed:", error);
+    }
+  }
+
+  if (recommended.length === 0 && interests.length > 0) {
+    let query = supabase
+      .from("opportunities")
+      .select("*")
+      .eq("is_active", true)
+      .overlaps("field_tags", interests)
+      .gte("deadline", nowIso)
+      .order("deadline", { ascending: true })
+      .limit(12);
+    if (trackedIds.size > 0) {
+      query = query.not("id", "in", `(${[...trackedIds].join(",")})`);
+    }
+    const { data } = await query;
+    recommended = ((data ?? []) as Opportunity[]).slice(0, 4);
+    if (recommended.length > 0) recommendedBy = "Based on your interests";
+  }
+
   const recent = (recentResult.data ?? []) as Opportunity[];
 
   const trackedStatuses = new Map(
-    ((trackedResult.data ?? []) as TrackedRow[])
+    trackedRows
       .filter((row) => row.opportunity)
       .map((row) => [row.opportunity!.id, row.status]),
   );
@@ -158,13 +275,20 @@ export default async function DashboardPage() {
         </section>
 
         <section className="mt-8">
-          <SectionLabel>Recommended for you</SectionLabel>
+          <SectionLabel>
+            Recommended for you
+            {recommendedBy ? (
+              <span className="ml-2 font-normal text-text-muted">
+                · {recommendedBy}
+              </span>
+            ) : null}
+          </SectionLabel>
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
             {recommended.length === 0 ? (
               <div className="md:col-span-2">
                 <EmptyNote>
                   {interests.length
-                    ? "Nothing matches your interests right now — check back after the next data refresh."
+                    ? "Nothing new matches you right now — check back after the next data refresh."
                     : "Add interests in your profile to get recommendations."}
                 </EmptyNote>
               </div>

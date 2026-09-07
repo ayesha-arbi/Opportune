@@ -184,9 +184,9 @@ export async function fetchPage(
  * Extract readable text from HTML
  */
 function extractReadableText(html: string): string {
-  // Remove script and style tags
-  let text = html.replace(/<script[^>]*>.*?<\/script>/gis, '');
-  text = text.replace(/<style[^>]*>.*?<\/style>/gis, '');
+  // Remove script and style tags ([\s\S] instead of the `s` flag — works on all targets)
+  let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
   
   // Remove HTML tags
   text = text.replace(/<[^>]+>/g, ' ');
@@ -318,10 +318,12 @@ Return a JSON object with these keys:
       return null;
     }
 
-    // Parse JSON from the response
+    // Parse JSON from the response (strip the ``` fence lines)
     let jsonStr = content.trim();
     if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.split('\n', 1)[1].rsplit('```', 1)[0].trim();
+      const withoutFirstLine = jsonStr.slice(jsonStr.indexOf('\n') + 1);
+      const end = withoutFirstLine.lastIndexOf('```');
+      jsonStr = (end === -1 ? withoutFirstLine : withoutFirstLine.slice(0, end)).trim();
     }
 
     const extracted = JSON.parse(jsonStr);

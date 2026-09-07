@@ -48,6 +48,12 @@ export type Profile = {
   dream_opportunity: string | null;
   biggest_challenge: string | null;
   fun_fact: string | null;
+  reminder_days_before: number | null;
+  digest_frequency: "off" | "weekly" | null;
+  last_digest_sent_at: string | null;
+  embedding: string | null;
+  embedding_model: string | null;
+  embedding_updated_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -70,6 +76,8 @@ export type Opportunity = {
   source_name: string | null;
   application_url: string | null;
   is_active: boolean | null;
+  embedding: string | null;
+  embedding_model: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -161,7 +169,17 @@ export interface Database {
       [_ in never]: never;
     };
     Functions: {
-      [_ in never]: never;
+      match_opportunities: {
+        Args: {
+          query_embedding: string;
+          match_count?: number;
+          filter_type?: string | null;
+          remote_only?: boolean | null;
+          deadline_after?: string | null;
+          deadline_before?: string | null;
+        };
+        Returns: { id: string; similarity: number }[];
+      };
     };
     Enums: {
       [_ in never]: never;

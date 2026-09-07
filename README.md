@@ -1,360 +1,172 @@
 # Opportune
 
-An AI-powered personalized opportunity finder that discovers hackathons, research programs, fellowships, competitions, and other opportunities based on your interests, education, skills, and goals. Track applications, get personalized recommendations through an AI chat interface, and receive deadline reminders so you never miss an opportunity.
+An AI-powered personalized opportunity finder. Tell it what you study and what you're aiming for, then ask in plain language for hackathons, research programs, fellowships, competitions, and grants — the AI searches a live, self-updating database (never its own memory), explains why each pick fits you, and tracks your applications through to acceptance letters.
 
-## 🎯 Project Context
+## What it does
 
-Opportune is evolving into a reliable opportunity-discovery platform that:
+- **AI chat** — ChatGPT-style interface with tool-calling: the assistant runs `search_opportunities` against the database, `update_tracker_status` to save or advance applications, and can browse allowlisted opportunity sites when the database comes up empty. Per-conversation history, markdown replies, copy button, and a live tool-activity trail.
+- **Semantic matching (pgvector)** — opportunities and user profiles are embedded and ranked by cosine similarity via a `match_opportunities` RPC, with keyword/tag search as fallback. Powers both chat search quality and dashboard recommendations.
+- **Tracker** — saved → applied → submitted → accepted/rejected, with notes, applied date, status filters, and a dense ticket-stub UI.
+- **Dashboard** — upcoming deadlines (with an aging-ink urgency stamp), semantic recommendations that exclude already-tracked items, and recently added opportunities.
+- **Notifications** — a daily cron (`/api/notifications`, Vercel Cron) emails per-user deadline reminders and a weekly "new matches" digest, honoring per-user preferences stored on the profile.
+- **Scraper** — a Python pipeline (Devpost, MLH, and config-driven WordPress/RSS aggregators, plus an optional AI-directed agentic crawler) that extracts into a strict Pydantic schema and upserts to Supabase. Runs daily via GitHub Actions.
+- **Auth & onboarding** — email/password auth with auto-created profiles, a three-step onboarding flow, RLS-protected profile editing, and direct-from-browser writes for everything except the chat flow.
 
-- Uses **Groq** instead of OpenRouter for AI inference
-- Scrapes and extracts real opportunities into a shared database
-- Supports configurable aggregator sources via a config-driven system
-- Uses AI not only for extraction, but also for deciding what pages and links to crawl (agentic scraping)
-- Provides both scheduled/background discovery and live, budget-capped in-chat discovery
-- Preserves strict extraction validation and prevents hallucinated deadlines, links, or other fields
+## Tech stack
 
-## ✨ Features
+| Layer | Tools |
+|---|---|
+| Frontend | Next.js 15 (App Router), TypeScript, Tailwind CSS, lucide-react, react-markdown |
+| Backend | Next.js API routes, Supabase (Postgres + RLS + Auth), Groq API (OpenAI-compatible), OpenAI-compatible embeddings, Resend |
+| Data | PostgreSQL + pgvector (HNSW, cosine), hand-written `Database` types |
+| Pipeline | Python 3.11, requests, BeautifulSoup, feedparser, Pydantic, Playwright (optional agentic mode) |
+| Infra | Vercel (app + cron), Supabase, GitHub Actions (scraper) |
 
-### ✅ Completed Features
+## Architecture: two deliberate data-access patterns
 
-#### Core Functionality
-- **AI-Powered Chat**: Natural language interface to find opportunities based on your profile
-- **Opportunity Tracker**: Save opportunities and track application status (Saved → Applied → Submitted → Accepted/Rejected)
-- **Personalized Recommendations**: AI matches opportunities to your interests, skills, and goals
-- **Deadline Tracking**: Visual countdown to upcoming deadlines with urgency indicators
-- **Profile Management**: Comprehensive onboarding with education, interests, skills, and goals
+1. **Chat flow → only `/api/chat`.** The browser never talks to Supabase for chat; tool execution happens server-side with the user's RLS-scoped client. User identity always comes from the session/bearer token — never a client-supplied ID.
+2. **Everything else → direct Supabase under RLS.** Onboarding/profile writes go through the browser client (the RLS policy *is* the authorization layer); dashboard and profile reads run in server components; tracker reads use the existing `/api/tracker` join.
 
-#### Scraping & Data Pipeline
-- **Config-Driven Aggregators**: Easily add new opportunity sources via configuration
-- **WordPress REST API Integration**: Primary discovery method for structured metadata
-- **RSS Feed Support**: Fallback for sources without REST APIs
-- **Multiple Source Support**: Devpost, MLH, Opportunities Corners, Opportunities Circle, Scholarships Positions, Youth Opportunities, Fully Funded Scholarships
-- **Deadline Validation**: Automatically rejects opportunities with past deadlines
-- **Deduplication System**: Smart matching to prevent duplicate opportunities from different sources
-- **Source Reliability Scoring**: Tracks which sources provide the best data
+Per-user daily chat cap (`CHAT_DAILY_LIMIT`) protects the only metered-cost endpoint.
 
-#### Agentic Scraping
-- **AI-Directed Crawling**: Agent decides which links to follow based on content analysis
-- **Shared Browsing Tools**: Reusable tools for both background and live chat contexts
-- **Domain Allowlist Enforcement**: Code-level security to prevent unauthorized crawling
-- **Fetch Budget Management**: Configurable limits (40-60 for background, 5-8 for chat)
-- **robots.txt Respect**: Checks and respects robots.txt for each domain
-- **Comprehensive Logging**: Records crawl path, decisions, and extraction results
-
-#### User Experience
-- **Enhanced Onboarding**: Progress bars, completion percentage, value explanations per step
-- **Loading States**: Dynamic loading messages during AI responses
-- **Mobile Responsive**: Optimized layouts for all screen sizes
-- **Delete Conversations**: Remove old chat conversations with one click
-- **Real-time Status Updates**: Tracker status syncs immediately when changed
-
-#### Email Notifications
-- **Deadline Reminders**: Automated emails for upcoming deadlines
-- **New Opportunity Alerts**: Notifications about opportunities matching user interests
-- **Beautiful HTML Templates**: Professional email formatting
-
-#### Infrastructure
-- **Groq Integration**: Fast, cost-effective AI inference using Groq API
-- **Supabase Backend**: Database, authentication, and real-time features
-- **GitHub Actions**: Automated scraping on schedule
-- **Type Safety**: Full TypeScript on frontend, Pydantic validation on backend
-
-### 🚧 Medium Priority Features (Not Yet Implemented)
-
-#### User Experience
-- **Voice Input**: Speech-to-text for easier chat interaction
-- **Quick Actions**: One-click save/apply from chat responses
-- **Better Loading States**: Skeleton screens and progressive loading
-- **Keyboard Shortcuts**: Power user navigation
-
-#### Scraping & Data
-- **Deduplication Improvements**: Enhanced matching algorithms
-- **Source Reliability Scoring UI**: Dashboard to view source performance
-- **More Opportunity Sources**: Additional aggregators and specialized platforms
-- **Real-time Validation**: Immediate feedback on scraped data quality
-
-#### Chat & AI
-- **Personalized Recommendations**: Better use of profile data for tailored suggestions
-- **Conversation Context**: Better handling of multi-turn conversations
-- **Tool Call Visualization**: Show user what tools the AI is using
-- **Conversation Branching**: Save and explore different conversation paths
-
-#### Tracker Features
-- **Calendar Integration**: Export deadlines to Google Calendar, etc.
-- **Application Progress**: Track stages (researching, applying, interviewing, etc.)
-- **Document Storage**: Attach essays, resumes to tracker entries
-- **Analytics Dashboard**: Success rates, time trends, preferred opportunity types
-
-### 🎨 Nice to Have / Low Priority Features
-
-#### Content & Discovery
-- **Advanced Search**: More filters (funding amount, duration, region, etc.)
-- **Saved Searches**: Save filter combinations for quick access
-- **Opportunity Collections**: Curate lists of related opportunities
-- **Trending Opportunities**: Show what's popular in the community
-
-#### Social Features
-- **Share Opportunities**: Send opportunities to friends
-- **Success Stories**: Showcase user achievements
-- **Community Discussion**: Forums around specific opportunities
-- **Peer Recommendations**: "X also applied to Y"
-
-#### Technical
-- **Performance Monitoring**: Track API response times, error rates
-- **Rate Limiting**: Protect against abuse
-- **Caching Layer**: Cache frequent queries and API responses
-- **A/B Testing**: Test different UI/UX approaches
-
-#### Security & Privacy
-- **Data Export**: Let users download their data
-- **Privacy Controls**: More granular sharing settings
-- **Enhanced Auth**: OAuth providers (Google, GitHub, etc.)
-- **Audit Logs**: Track account activity
-
-## 🛠️ Tech Stack
-
-### Frontend
-- **Next.js 14** - React framework with App Router
-- **TypeScript** - Type safety
-- **Tailwind CSS** - Styling
-- **Lucide React** - Icons
-- **Supabase Client** - Authentication and database
-
-### Backend
-- **Python 3** - Scraping and data processing
-- **Groq API** - AI inference (OpenAI-compatible)
-- **Supabase** - Database (PostgreSQL), authentication, real-time
-- **Resend** - Email notifications
-- **Requests** - HTTP client
-- **BeautifulSoup** - HTML parsing
-- **Feedparser** - RSS feed parsing
-- **Pydantic** - Data validation
-
-### Infrastructure
-- **GitHub Actions** - CI/CD and scheduled scraping
-- **Supabase** - Managed database and auth
-- **Groq Cloud** - AI inference
-
-## 📁 Project Structure
+## Project structure
 
 ```
 Opportune/
-├── app/                          # Next.js App Router
-│   ├── api/                      # API routes
-│   │   ├── chat/                 # Chat API with Groq integration
-│   │   ├── tracker/              # Opportunity tracker API
-│   │   └── chat/conversations/   # Conversation management
-│   ├── chat/                     # Chat page
-│   ├── dashboard/                # Dashboard page
-│   ├── profile/                  # Profile page
-│   └── onboarding/               # Onboarding flow
-├── components/                    # React components
-│   ├── chat/                     # Chat UI components
-│   ├── opportunities/            # Opportunity cards
-│   └── common/                   # Shared components
-├── lib/                          # Shared libraries
-│   ├── ai/                       # AI integration
-│   │   ├── groq.ts              # Groq API client
-│   │   └── browsing-tools.ts    # Agentic browsing tools
-│   ├── supabase/                 # Supabase client
-│   └── utils.ts                  # Utility functions
-├── scraper/                      # Python scraper
-│   ├── main.py                   # Main scraper entry point
-│   ├── config.py                 # Source configurations
-│   ├── schema.py                 # Data models and validation
-│   ├── llm.py                    # Groq integration for extraction
-│   ├── db.py                     # Database operations
-│   ├── deduplication.py          # Deduplication utilities
-│   ├── notifications.py          # Email notification system
-│   ├── reliability.py            # Source reliability scoring
-│   ├── agentic_crawler.py        # AI-directed crawler
-│   └── sources/                  # Source-specific scrapers
-│       ├── devpost.py           # Devpost scraper
-│       ├── mlh.py               # MLH scraper
-│       └── wordpress.py         # Generic WordPress scraper
-├── supabase/                     # Supabase configuration
-│   ├── migrations/               # Database migrations
-│   └── config.toml              # Supabase config
-├── types/                        # TypeScript types
-│   └── database.ts               # Database type definitions
-└── .env.example                  # Environment variables template
+├── app/
+│   ├── api/
+│   │   ├── chat/            # Chat + tool-calling (Groq, rate-limited)
+│   │   ├── tracker/         # Tracker CRUD (joined reads, upserts, deletes)
+│   │   └── notifications/   # Deadline reminders + weekly digest (cron)
+│   ├── chat/                # Chat page (server history + client view)
+│   ├── dashboard/           # Dashboard (server component)
+│   ├── tracker/             # Tracker page
+│   ├── profile/             # Profile (bento grid + notification settings)
+│   ├── onboarding/          # 3-step onboarding
+│   └── login/ signup/       # Auth pages
+├── components/              # chat/, tracker/, opportunities/, profile/, common/
+├── lib/
+│   ├── ai/                  # groq.ts, embeddings.ts, browsing-tools.ts
+│   ├── supabase/            # server.ts, client.ts, middleware.ts
+│   └── utils.ts             # Shared validators
+├── scripts/                 # backfill-embeddings.ts (Phase 8 backfill)
+├── scraper/                 # Python pipeline (see below)
+├── supabase/
+│   ├── migrations/          # 001–006 (schema → chat threads → profile fields
+│   │                        # → source_url unique → pgvector → notif prefs)
+│   └── seed_opportunities.sql
+├── types/database.ts        # Hand-written Database types
+├── middleware.ts            # Session refresh + auth gates
+└── vercel.json              # Cron: notifications daily 09:00 UTC
 ```
 
-## 🚀 Getting Started
+## Getting started
 
-### Prerequisites
-- Node.js 18+
-- Python 3.8+
-- Supabase account
-- Groq API key
-- Resend API key (for email notifications)
+**Prerequisites:** Node 20+, Python 3.11+, a Supabase project, a Groq API key, and (for semantic matching) an OpenAI-compatible embeddings key.
 
-### Setup
-
-1. **Clone the repository**
 ```bash
-git clone <repository-url>
+git clone https://github.com/ayesha-arbi/Opportune.git
 cd Opportune
-```
-
-2. **Install frontend dependencies**
-```bash
 npm install
-```
-
-3. **Install Python dependencies**
-```bash
 pip install -r scraper/requirements.txt
+cp .env.example .env   # then fill in the values below
 ```
 
-4. **Configure environment variables**
-Copy `.env.example` to `.env` and fill in your credentials:
+### Environment variables
+
 ```bash
-cp .env.example .env
+# Public (browser-safe)
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+# Server-only — never exposed to the browser
+SUPABASE_SERVICE_ROLE_KEY=     # notifications cron + scraper + backfill
+GROQ_API_KEY=                  # chat + scraper extraction
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_MAX_TOKENS=2048
+EMBEDDING_API_KEY=             # semantic matching (text-embedding-3-small default)
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_BASE_URL=            # optional: non-OpenAI OpenAI-compatible endpoint
+CHAT_DAILY_LIMIT=30            # per-user daily chat cap
+RESEND_API_KEY=
+EMAIL_FROM=Opportune <onboarding@resend.dev>
+CRON_SECRET=                   # Vercel Cron sends this as a Bearer token
 ```
 
-Required environment variables:
-- `NEXT_PUBLIC_SUPABASE_URL` - Your Supabase project URL
-- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` - Supabase anon key
-- `SUPABASE_SERVICE_ROLE_KEY` - Supabase service role key
-- `GROQ_API_KEY` - Groq API key
-- `GROQ_MODEL` - Groq model ID (default: `openai/gpt-oss-20b`)
-- `GROQ_MAX_TOKENS` - Max tokens for Groq requests
-- `NEXT_PUBLIC_APP_URL` - Your application URL
-- `RESEND_API_KEY` - Resend API key (for email notifications)
-- `EMAIL_FROM` - From email address for notifications
-- `CRON_SECRET` - Secret for GitHub Actions cron
-- `RUN_AGENTIC_CRAWLER` - Set to `true` to enable agentic crawler
+### Database setup
 
-5. **Set up Supabase**
-- Create a new Supabase project
-- Run the migrations in `supabase/migrations/` in the Supabase SQL editor
-- Configure Row Level Security policies (included in migrations)
+Run each migration in `supabase/migrations/` **in numeric order** in the Supabase SQL editor (or `supabase db push`):
 
-6. **Run the development server**
+`001` schema + RLS · `002` chat threads · `003` profile open-ended fields · `004` source_url unique · `005` pgvector + match RPC · `006` notification preferences.
+
+Then, optionally, seed sample opportunities:
+
 ```bash
-npm run dev
+# paste supabase/seed_opportunities.sql into the SQL editor, or:
+psql "$SUPABASE_DB_URL" -f supabase/seed_opportunities.sql
 ```
 
-7. **Run the scraper (optional)**
+Seed deadlines are illustrative — the scraper replaces them with real data.
+
+### Embeddings backfill (semantic matching)
+
+After migrations + seed, with `EMBEDDING_API_KEY` set:
+
 ```bash
-python scraper/main.py
+npx tsx scripts/backfill-embeddings.ts
 ```
 
-## 🔧 Configuration
+Only rows with a null embedding are processed, so it's safely re-runnable after scraper runs. Profile embeddings are computed lazily (and refreshed on profile changes) by the dashboard itself.
 
-### Adding New Opportunity Sources
+### Run
 
-Edit `scraper/config.py` to add new sources:
-
-```python
-NEW_SOURCE = SourceConfig(
-    name="new_source",
-    display_name="New Source",
-    base_url="https://example.com",
-    discovery_method="wp_rest_api",  # or "rss_feed" or "html_scrape"
-    discovery_endpoint="/wp-json/wp/v2/posts",
-    excluded_categories=["Blog", "News"],
-    limit=10,
-    check_title_for_deadline=True,
-    default_remote=False,
-)
-
-SOURCES: dict[str, SourceConfig] = {
-    "new_source": NEW_SOURCE,
-    # ... other sources
-}
-```
-
-Then add the domain to allowlists:
-- `lib/ai/browsing-tools.ts` - `ALLOWED_DOMAINS`
-- `scraper/agentic_crawler.py` - `ALLOWED_DOMAINS` and `STARTING_URLS`
-
-### Enabling Agentic Crawler
-
-Set the environment variable:
 ```bash
-export RUN_AGENTIC_CRAWLER=true
-python scraper/main.py
+npm run dev        # http://localhost:3000
+npm run build      # production build check
+npm run typecheck
 ```
 
-The agentic crawler will:
-- Start from configured source homepages
-- Use AI to decide which links to follow
-- Extract opportunities from relevant pages
-- Respect fetch budgets and robots.txt
-- Log the crawl path for debugging
+## The scraper
 
-## 📊 Database Schema
-
-### Tables
-
-**profiles**
-- User profile information (education, interests, skills, goals, etc.)
-
-**opportunities**
-- Opportunity data (title, description, type, deadline, etc.)
-- Unique constraint on `source_url` for deduplication
-
-**user_opportunities**
-- User's tracked opportunities with status
-- Links profiles to opportunities
-
-**chat_messages**
-- Chat conversation history
-- Supports conversation grouping
-
-## 🔐 Security
-
-- Row Level Security (RLS) enabled on all tables
-- Users can only access their own data
-- Domain allowlist enforcement for agentic crawling
-- robots.txt respect for ethical scraping
-- No API keys exposed in client-side code
-
-## 📈 Monitoring & Logging
-
-### Source Reliability
-
-The scraper tracks source reliability metrics:
-- Success rate
-- Freshness rate (non-expired opportunities)
-- Response times
-- Error rates
-
-View source performance:
-```python
-from scraper.reliability import print_source_report
-print_source_report()
+```bash
+# Always run as a module from the repo root — never `python scraper/main.py`
+python -m scraper.main
 ```
 
-### Crawler Logging
+- **Sources** are config-driven: add a `SourceConfig` to `scraper/config.py` (`wp_rest_api` or `rss_feed` discovery), then add the domain to the allowlists in `lib/ai/browsing-tools.ts` and `scraper/agentic_crawler.py`.
+- **Agentic crawler** (optional, `RUN_AGENTIC_CRAWLER=true`): the LLM decides which links to follow within a fetch budget, respecting robots.txt and a domain allowlist.
+- **Extraction** is strict: the schema rejects hallucinated deadlines, past deadlines, and non-opportunity pages.
+- **Scheduled runs** use GitHub Actions (`.github/workflows/scraper.yml`, daily 02:00 UTC). Add repo secrets: `GROQ_API_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
 
-The agentic crawler logs:
-- URLs visited
-- Actions taken (extracted, skipped, followed)
-- Reasons for decisions
-- Extraction results
+## Notifications
 
-## 🤝 Contributing
+`vercel.json` schedules `GET /api/notifications` daily at 09:00 UTC (adjust for your timezone). The endpoint:
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+- verifies `Authorization: Bearer $CRON_SECRET` (Vercel Cron sends it automatically when `CRON_SECRET` is set),
+- emails each user their tracked opportunities closing within *their own* reminder window (`reminder_days_before`, default 3),
+- sends a weekly "new matches" digest for users with `digest_frequency = 'weekly'`,
+- marks rows sent (`reminder_sent`) so nothing double-sends, and returns a JSON summary with per-failure detail.
 
-## 📝 License
+Set `CRON_SECRET` in Vercel project env vars and run the cron against production. `onboarding@resend.dev` only delivers to your own account — verify a domain in Resend before real users.
 
-[Your License Here]
+## Security
 
-## 🙏 Acknowledgments
+- RLS on every table; users can only read/write their own rows; opportunities are readable by authenticated users and writable only via the service role.
+- Service-role, Groq, embeddings, and Resend keys are server-only. Client components never receive them.
+- Client-supplied user IDs are always ignored — identity comes from the Supabase session or bearer token.
+- Chat is rate-limited per user per day; the cron endpoint fails closed without `CRON_SECRET`.
+- The agentic crawler enforces a domain allowlist and fetch budgets.
 
-- Groq for fast AI inference
-- Supabase for backend infrastructure
-- Resend for email services
-- The open-source community
+## Roadmap
 
-## 📞 Support
+- Voice input and keyboard shortcuts in chat
+- Calendar export (deadlines → Google Calendar)
+- Application documents attached to tracker entries
+- Source reliability dashboard for the scraper
+- More sources and richer filters (funding amount, region, duration)
+- OAuth providers and data export
 
-For support, please open an issue in the GitHub repository or contact [your email].
+## License
+
+AGPL-3.0 — see [LICENSE](LICENSE).

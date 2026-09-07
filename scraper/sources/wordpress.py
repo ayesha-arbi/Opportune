@@ -4,30 +4,33 @@ Handles both WP REST API and RSS feed discovery methods.
 """
 import logging
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from scraper.config import SourceConfig
 from scraper.schema import OpportunityExtracted
 from scraper.llm import extract_opportunity_json
 
 logger = logging.getLogger("scraper.sources.wordpress")
 
-def scrape_wordpress_source(config: SourceConfig) -> List[OpportunityExtracted]:
+def scrape_wordpress_source(config: SourceConfig, limit: Optional[int] = None) -> List[OpportunityExtracted]:
     """
     Generic WordPress source scraper using the config system.
+    `limit` overrides the per-run item cap from the source config.
     """
     logger.info(f"Scraping {config.display_name} from {config.base_url}...")
-    
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
+
+    effective_limit = limit if limit is not None else config.limit
+
     results: List[OpportunityExtracted] = []
-    
+
     try:
         if config.discovery_method == "wp_rest_api":
-            results = _scrape_wp_rest_api(config, headers)
+            results = _scrape_wp_rest_api(config, headers, effective_limit)
         elif config.discovery_method == "rss_feed":
-            results = _scrape_rss_feed(config, headers)
+            results = _scrape_rss_feed(config, headers, effective_limit)
         else:
             logger.error(f"Unsupported discovery method: {config.discovery_method}")
             return []
@@ -39,13 +42,13 @@ def scrape_wordpress_source(config: SourceConfig) -> List[OpportunityExtracted]:
         logger.error(f"Error scraping {config.display_name}: {e}", exc_info=True)
         return []
 
-def _scrape_wp_rest_api(config: SourceConfig, headers: Dict[str, str]) -> List[OpportunityExtracted]:
+def _scrape_wp_rest_api(config: SourceConfig, headers: Dict[str, str], limit: int) -> List[OpportunityExtracted]:
     """Scrape using WordPress REST API."""
     endpoint = f"{config.base_url}{config.discovery_endpoint}"
     logger.info(f"Fetching from WP REST API: {endpoint}")
-    
+
     params = {
-        "per_page": config.limit,
+        "per_page": limit,
         "_fields": "id,title,link,content,categories,tags,date"
     }
     
@@ -107,7 +110,7 @@ def _scrape_wp_rest_api(config: SourceConfig, headers: Dict[str, str]) -> List[O
     
     return results
 
-def _scrape_rss_feed(config: SourceConfig, headers: Dict[str, str]) -> List[OpportunityExtracted]:
+def _scrape_rss_feed(config: SourceConfig, headers: Dict[str, str], limit: int) -> List[OpportunityExtracted]:
     """Scrape using RSS feed."""
     import feedparser
     
@@ -121,7 +124,7 @@ def _scrape_rss_feed(config: SourceConfig, headers: Dict[str, str]) -> List[Oppo
     
     results: List[OpportunityExtracted] = []
     
-    for entry in feed.entries[:config.limit]:
+    for entry in feed.entries[:limit]:
         link = entry.get("link", "")
         title = entry.get("title", "")
         content = entry.get("description", "") or entry.get("content", [{}])[0].get("value", "")

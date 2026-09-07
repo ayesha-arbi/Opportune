@@ -16,6 +16,10 @@ import {
   getRemainingBudget,
 } from "@/lib/ai/browsing-tools";
 import {
+  embedText,
+  embeddingsConfigured,
+} from "@/lib/ai/embeddings";
+import {
   isOpportunityType,
   isTrackerStatus,
   isUuid,
@@ -101,6 +105,11 @@ const SEARCH_OPPORTUNITIES_TOOL: ToolSchema = {
           description:
             "Free-text keywords matched against title, description, and tags, e.g. ['sustainability'].",
         },
+        semantic_query: {
+          type: "string",
+          description:
+            "A natural-language description of what the user is looking for, ranked by meaning. Prefer this over keywords for open-ended requests like 'something to boost my grad school applications'.",
+        },
         limit: {
           type: "integer",
           minimum: 1,
@@ -173,6 +182,7 @@ interface SearchArgs {
   education_level?: string;
   remote_only?: boolean;
   keywords?: string[];
+  semantic_query?: string;
   limit?: number;
 }
 
@@ -207,6 +217,10 @@ function parseSearchArgs(raw: unknown): SearchArgs {
       typeof args.education_level === "string" ? args.education_level : undefined,
     remote_only: args.remote_only === true,
     keywords: strings(args.keywords, 8),
+    semantic_query:
+      typeof args.semantic_query === "string" && args.semantic_query.trim()
+        ? args.semantic_query.trim().slice(0, 500)
+        : undefined,
     limit: typeof args.limit === "number" ? args.limit : undefined,
   };
 }
@@ -232,16 +246,97 @@ function toModelResult(opportunity: Opportunity) {
   };
 }
 
+/** Education-level and keyword post-filters, shared by both search paths. */
+function filterByEducationAndKeywords(
+  rows: Opportunity[],
+  args: SearchArgs,
+): Opportunity[] {
+  let result = rows;
+
+  // education_level lives in the jsonb eligibility blob, so it is filtered
+  // post-query. Opportunities with no stated restriction are open to all.
+  const edu = args.education_level?.toLowerCase();
+  if (edu && edu !== "any") {
+    result = result.filter((row) => {
+      const levels = (row.eligibility?.edu_level ?? []).map((level) =>
+        level.toLowerCase(),
+      );
+      return (
+        levels.length === 0 ||
+        levels.some((level) => level.includes(edu) || edu.includes(level))
+      );
+    });
+  }
+
+  if (args.keywords?.length) {
+    const keywords = args.keywords.map((keyword) => keyword.toLowerCase());
+    result = result.filter((row) => {
+      const haystack =
+        `${row.title} ${row.description ?? ""} ${row.field_tags.join(" ")}`.toLowerCase();
+      return keywords.some((keyword) => haystack.includes(keyword));
+    });
+  }
+
+  return result;
+}
+
 async function executeSearchOpportunities(
   supabase: TypedSupabaseClient,
   args: SearchArgs,
 ): Promise<Opportunity[]> {
+  const limit = Math.min(Math.max(args.limit ?? DEFAULT_SEARCH_LIMIT, 1), 20);
+
+  // Semantic path: embed the natural-language query and rank by cosine
+  // similarity (pgvector), with the hard filters applied inside the RPC.
+  // Falls back to the keyword path when embeddings aren't configured,
+  // fail, or match nothing.
+  const semanticQuery = args.semantic_query ?? args.keywords?.join(" ");
+  if (semanticQuery && embeddingsConfigured()) {
+    try {
+      const embedding = await embedText(semanticQuery);
+      const { data: matches, error: rpcError } = await supabase.rpc(
+        "match_opportunities",
+        {
+          query_embedding: embedding,
+          match_count: limit,
+          filter_type: args.type ?? null,
+          remote_only: args.remote_only ? true : null,
+          deadline_after: args.deadline_after ?? null,
+          deadline_before: args.deadline_before ?? null,
+        },
+      );
+      if (rpcError) throw new Error(rpcError.message);
+
+      const ids = (matches ?? []).map((match) => match.id);
+      if (ids.length > 0) {
+        const { data, error } = await supabase
+          .from("opportunities")
+          .select("*")
+          .in("id", ids);
+        if (error) throw new Error(error.message);
+        const byId = new Map(
+          ((data ?? []) as Opportunity[]).map((row) => [row.id, row]),
+        );
+        const rows = ids
+          .map((id) => byId.get(id))
+          .filter((row): row is Opportunity => Boolean(row));
+        const filtered = filterByEducationAndKeywords(rows, args);
+        if (filtered.length > 0) return filtered;
+      }
+    } catch (semanticError) {
+      console.warn(
+        "[chat] semantic search failed, falling back to keyword search:",
+        semanticError,
+      );
+    }
+  }
+
   let query = supabase
     .from("opportunities")
     .select("*")
     .eq("is_active", true)
     .order("deadline", { ascending: true, nullsFirst: false })
-    .limit(Math.min(Math.max(args.limit ?? DEFAULT_SEARCH_LIMIT, 1), 20));
+    .limit(limit);
 
   if (args.type) query = query.eq("type", args.type);
   if (args.remote_only) query = query.eq("is_remote", true);
@@ -253,35 +348,7 @@ async function executeSearchOpportunities(
 
   const { data, error } = await query;
   if (error) throw new Error(`Opportunity search failed: ${error.message}`);
-  let rows: Opportunity[] = data ?? [];
-
-  // education_level lives in the jsonb eligibility blob and keywords are
-  // free-text, so both are filtered post-query. Enough for seeded data;
-  // pgvector ranking replaces this in a later phase.
-  const edu = args.education_level?.toLowerCase();
-  if (edu && edu !== "any") {
-    rows = rows.filter((row) => {
-      const levels = (row.eligibility?.edu_level ?? []).map((level) =>
-        level.toLowerCase(),
-      );
-      // Opportunities with no stated education restriction are open to all.
-      return (
-        levels.length === 0 ||
-        levels.some((level) => level.includes(edu) || edu.includes(level))
-      );
-    });
-  }
-
-  if (args.keywords?.length) {
-    const keywords = args.keywords.map((keyword) => keyword.toLowerCase());
-    rows = rows.filter((row) => {
-      const haystack =
-        `${row.title} ${row.description ?? ""} ${row.field_tags.join(" ")}`.toLowerCase();
-      return keywords.some((keyword) => haystack.includes(keyword));
-    });
-  }
-
-  return rows;
+  return filterByEducationAndKeywords(data ?? [], args);
 }
 
 async function executeUpdateTrackerStatus(
@@ -425,6 +492,25 @@ function buildSystemPrompt(profile: Profile | null): string {
 export async function POST(req: Request) {
   try {
     const { user, supabase } = await getAuthenticatedUser(req);
+
+    // Per-user daily cap — chat is the only metered-cost surface.
+    const dailyLimit = Number(process.env.CHAT_DAILY_LIMIT) || 30;
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    const { count: sentToday, error: usageError } = await supabase
+      .from("chat_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("role", "user")
+      .gte("created_at", startOfDay.toISOString());
+    if (!usageError && (sentToday ?? 0) >= dailyLimit) {
+      return NextResponse.json(
+        {
+          error: `Daily chat limit reached (${dailyLimit} messages). Your allowance resets at midnight UTC.`,
+        },
+        { status: 429 },
+      );
+    }
 
     const body = (await req.json().catch(() => null)) as {
       message?: unknown;
