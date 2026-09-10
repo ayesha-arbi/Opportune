@@ -246,15 +246,97 @@ function toModelResult(opportunity: Opportunity) {
   };
 }
 
+// Synonym map for rich deep search expansion
+const SYNONYM_MAP: Record<string, string[]> = {
+  ai: [
+    "ai",
+    "artificial intelligence",
+    "machine learning",
+    "ml",
+    "deep learning",
+    "llm",
+    "neural",
+    "nlp",
+    "computer vision",
+    "generative ai",
+    "agents",
+  ],
+  "machine learning": [
+    "machine learning",
+    "ml",
+    "ai",
+    "artificial intelligence",
+    "deep learning",
+    "data science",
+  ],
+  hackathon: [
+    "hackathon",
+    "hack",
+    "buildathon",
+    "challenge",
+    "competition",
+    "hack week",
+  ],
+  web3: [
+    "web3",
+    "crypto",
+    "blockchain",
+    "ethereum",
+    "solana",
+    "smart contracts",
+    "defi",
+  ],
+  research: [
+    "research",
+    "fellowship",
+    "scholarship",
+    "phd",
+    "academic",
+    "lab",
+    "visiting student",
+  ],
+  fellowship: [
+    "fellowship",
+    "scholarship",
+    "grant",
+    "internship",
+    "mentorship",
+    "research",
+  ],
+  grant: ["grant", "funding", "scholarship", "fellowship", "award"],
+  competition: [
+    "competition",
+    "challenge",
+    "contest",
+    "hackathon",
+    "cup",
+    "prize",
+  ],
+};
+
+function expandSearchKeywords(tagsOrKeywords: string[]): string[] {
+  const expanded = new Set<string>();
+  for (const item of tagsOrKeywords) {
+    const lower = item.toLowerCase().trim();
+    if (!lower) continue;
+    expanded.add(lower);
+    for (const [key, synonyms] of Object.entries(SYNONYM_MAP)) {
+      if (lower.includes(key) || key.includes(lower)) {
+        synonyms.forEach((syn) => expanded.add(syn));
+      }
+    }
+  }
+  return Array.from(expanded);
+}
+
 /** Education-level and keyword post-filters, shared by both search paths. */
 function filterByEducationAndKeywords(
   rows: Opportunity[],
   args: SearchArgs,
+  looseKeywords: boolean = false,
 ): Opportunity[] {
   let result = rows;
 
-  // education_level lives in the jsonb eligibility blob, so it is filtered
-  // post-query. Opportunities with no stated restriction are open to all.
   const edu = args.education_level?.toLowerCase();
   if (edu && edu !== "any") {
     result = result.filter((row) => {
@@ -268,12 +350,23 @@ function filterByEducationAndKeywords(
     });
   }
 
-  if (args.keywords?.length) {
-    const keywords = args.keywords.map((keyword) => keyword.toLowerCase());
+  const rawKeywords = [
+    ...(args.keywords ?? []),
+    ...(args.field_tags ?? []),
+  ];
+
+  if (rawKeywords.length > 0) {
+    const expandedKeywords = expandSearchKeywords(rawKeywords);
     result = result.filter((row) => {
       const haystack =
-        `${row.title} ${row.description ?? ""} ${row.field_tags.join(" ")}`.toLowerCase();
-      return keywords.some((keyword) => haystack.includes(keyword));
+        `${row.title} ${row.description ?? ""} ${(row.field_tags ?? []).join(" ")} ${row.organizer ?? ""}`.toLowerCase();
+      if (looseKeywords) {
+        return expandedKeywords.some((keyword) => haystack.includes(keyword));
+      }
+      return (
+        expandedKeywords.some((keyword) => haystack.includes(keyword)) ||
+        rawKeywords.some((keyword) => haystack.includes(keyword.toLowerCase()))
+      );
     });
   }
 
@@ -285,11 +378,9 @@ async function executeSearchOpportunities(
   args: SearchArgs,
 ): Promise<Opportunity[]> {
   const limit = Math.min(Math.max(args.limit ?? DEFAULT_SEARCH_LIMIT, 1), 20);
+  const nowIso = new Date().toISOString();
 
-  // Semantic path: embed the natural-language query and rank by cosine
-  // similarity (pgvector), with the hard filters applied inside the RPC.
-  // Falls back to the keyword path when embeddings aren't configured,
-  // fail, or match nothing.
+  // Semantic path: embed the natural-language query and rank by cosine similarity
   const semanticQuery = args.semantic_query ?? args.keywords?.join(" ");
   if (semanticQuery && embeddingsConfigured()) {
     try {
@@ -325,30 +416,81 @@ async function executeSearchOpportunities(
       }
     } catch (semanticError) {
       console.warn(
-        "[chat] semantic search failed, falling back to keyword search:",
+        "[chat] semantic search failed, falling back to deep search:",
         semanticError,
       );
     }
   }
 
-  let query = supabase
+  // Pass 1: Strict query with all provided filters
+  let query1 = supabase
     .from("opportunities")
     .select("*")
     .eq("is_active", true)
     .order("deadline", { ascending: true, nullsFirst: false })
     .limit(limit);
 
-  if (args.type) query = query.eq("type", args.type);
-  if (args.remote_only) query = query.eq("is_remote", true);
-  if (args.deadline_before) query = query.lte("deadline", args.deadline_before);
-  if (args.deadline_after) query = query.gte("deadline", args.deadline_after);
+  if (args.type) query1 = query1.eq("type", args.type);
+  if (args.remote_only) query1 = query1.eq("is_remote", true);
+  if (args.deadline_before) query1 = query1.lte("deadline", args.deadline_before);
+  if (args.deadline_after) query1 = query1.gte("deadline", args.deadline_after);
   if (args.field_tags?.length) {
-    query = query.overlaps("field_tags", args.field_tags);
+    query1 = query1.overlaps("field_tags", args.field_tags);
   }
 
-  const { data, error } = await query;
-  if (error) throw new Error(`Opportunity search failed: ${error.message}`);
-  return filterByEducationAndKeywords(data ?? [], args);
+  const { data: data1 } = await query1;
+  const filtered1 = filterByEducationAndKeywords(data1 ?? [], args);
+  if (filtered1.length >= 2) {
+    return filtered1;
+  }
+
+  // Pass 2 (Deep Search): Broaden deadline window & search with synonym expansion
+  let query2 = supabase
+    .from("opportunities")
+    .select("*")
+    .eq("is_active", true)
+    .gte("deadline", nowIso)
+    .order("deadline", { ascending: true, nullsFirst: false })
+    .limit(limit * 2);
+
+  if (args.type) query2 = query2.eq("type", args.type);
+  if (args.remote_only) query2 = query2.eq("is_remote", true);
+
+  const { data: data2 } = await query2;
+  const filtered2 = filterByEducationAndKeywords(data2 ?? [], args, true);
+  if (filtered2.length > 0) {
+    // Deduplicate with pass 1 results
+    const seen = new Set(filtered1.map((r) => r.id));
+    const merged = [...filtered1];
+    for (const row of filtered2) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id);
+        merged.push(row);
+      }
+    }
+    if (merged.length >= 2) return merged.slice(0, limit);
+  }
+
+  // Pass 3 (Exhaustive Search): Check related opportunity types & all locations
+  const { data: data3 } = await supabase
+    .from("opportunities")
+    .select("*")
+    .eq("is_active", true)
+    .gte("deadline", nowIso)
+    .order("deadline", { ascending: true, nullsFirst: false })
+    .limit(limit * 3);
+
+  const filtered3 = filterByEducationAndKeywords(data3 ?? [], args, true);
+  const seenAll = new Set(filtered1.map((r) => r.id));
+  const finalResults = [...filtered1];
+  for (const row of filtered3) {
+    if (!seenAll.has(row.id)) {
+      seenAll.add(row.id);
+      finalResults.push(row);
+    }
+  }
+
+  return finalResults.slice(0, limit);
 }
 
 async function executeUpdateTrackerStatus(
@@ -450,16 +592,18 @@ async function executeWebBrowseOpportunities(
 function buildSystemPrompt(profile: Profile | null): string {
   const today = new Date().toISOString().slice(0, 10);
   const lines = [
-    "You are Opportune, an assistant that helps students find and track opportunities: hackathons, research fellowships and programs, competitions, innovation challenges, entrepreneurship contests, and grants/scholarships.",
+    "You are Opportune, an intelligent AI scout and advisor that helps students discover and track world-class opportunities: hackathons, research fellowships and programs, competitions, innovation challenges, and grants/scholarships.",
     `Today's date is ${today}. Always judge deadlines against this date.`,
     "",
-    "Rules:",
-    "- ONLY recommend opportunities that exist in the user's database. Use the search_opportunities tool to find them; never invent opportunities, deadlines, or links from your own knowledge.",
-    "- NEVER recommend jobs, internships, or full-time positions.",
-    "- When presenting recommendations, briefly explain WHY each one fits this user's profile (education, interests, skills, goals). Never just dump a list.",
-    "- Use update_tracker_status when the user asks to save an opportunity or mark it applied/submitted/accepted/rejected. The opportunity_id must come from search results in this conversation.",
-    "- If a search returns nothing relevant, say so honestly and suggest how to broaden it (different type, wider deadline window, fewer filters).",
-    "- Keep answers concise and concrete.",
+    "Rules for Deep & Thorough Searching:",
+    "- ALWAYS call the `search_opportunities` tool to find matches from the live database. Use relevant keywords, topic tags, and semantic queries.",
+    "- Deep & Proactive Search: When users ask for opportunities in a specific window (e.g. 'this month'), search for immediate opportunities AND upcoming deadlines so the user always receives actionable, high-value recommendations.",
+    "- If your initial search returns few or no results, do NOT give up or send an empty response. Perform a broader search (or use `web_browse_opportunities` if available) within the same turn to ensure you find compelling options for the user.",
+    "- NEVER recommend standard full-time jobs or corporate internships — focus on hackathons, research programs, student fellowships, competitions, and grants.",
+    "- For each opportunity you present, clearly explain WHY it fits the user's background, education, skills, or stated goals.",
+    "- Highlight key details: exact deadline, format (remote vs in-person), prize/grant amount, organizer, and direct application link.",
+    "- Use `update_tracker_status` when the user asks to save an opportunity or track its application progress.",
+    "- Maintain a supportive, ambitious, and highly structured tone.",
   ];
 
   if (profile) {
