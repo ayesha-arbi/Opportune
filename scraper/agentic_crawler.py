@@ -7,6 +7,7 @@ import sys
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from urllib.parse import urlparse, urljoin
 import requests
 
 # Add parent directory to path for imports
@@ -27,11 +28,15 @@ logging.basicConfig(
 logger = logging.getLogger("scraper.agentic_crawler")
 
 # Configuration
+# NOTE: devpost.com and mlh.io were removed from here on purpose — they're
+# JS-rendered (React/Next) sites, so a plain requests.get() only sees the
+# empty page shell, not the actual event list. They're already covered
+# properly by sources/devpost.py and sources/mlh.py (presumably via API).
+# This crawler is for the server-rendered / WordPress-style sites where
+# link-following actually works.
 ALLOWED_DOMAINS = [
     "opportunitiescorners.com",
     "www.opportunitiescircle.com",
-    "devpost.com",
-    "mlh.io",
     "scholarships-positions.com",
     "youthopportunities.org",
     "fullyfundedscholarships.com",
@@ -40,8 +45,6 @@ ALLOWED_DOMAINS = [
 STARTING_URLS = [
     "https://opportunitiescorners.com",
     "https://www.opportunitiescircle.com",
-    "https://devpost.com/hackathons",
-    "https://mlh.io/seasons/2026/events",
     "https://www.scholarships-positions.com",
     "https://www.youthopportunities.org",
     "https://www.fullyfundedscholarships.com",
@@ -83,7 +86,6 @@ class BrowsingConfig:
 
 def extract_domain(url: str) -> Optional[str]:
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(url)
         return parsed.netloc
     except:
@@ -140,7 +142,6 @@ def fetch_page(url: str, config: BrowsingConfig) -> Dict[str, Any]:
             
             # Resolve relative URLs
             if href.startswith('/'):
-                from urllib.parse import urljoin
                 href = urljoin(url, href)
             elif not href.startswith('http'):
                 continue
@@ -156,44 +157,63 @@ def fetch_page(url: str, config: BrowsingConfig) -> Dict[str, Any]:
 
 def should_follow_link(link: Dict[str, str], context: str) -> bool:
     """AI decision: should the agent follow this link?"""
-    # Simple heuristic-based implementation for now
-    # In production, this would use AI to decide
-    
+    # Heuristic-based implementation
+
     href = link["href"].lower()
     text = link["text"].lower()
-    
-    # Skip common non-opportunity links
+
+    # Skip common non-opportunity links. NOTE: pagination markers
+    # ("page/", "/page/") used to be in here, which meant the crawler
+    # could never move past page 1 of any listing. Removed.
     skip_patterns = [
         "privacy", "terms", "contact", "about", "advertise", "subscribe",
         "whatsapp", "telegram", "facebook", "twitter", "instagram",
         "login", "register", "signin", "signup",
-        "page/", "/page/", "wp-admin", "xmlrpc", "feed",
+        "wp-admin", "xmlrpc", "feed", "mailto:", "javascript:", "#",
     ]
-    
+
     for pattern in skip_patterns:
-        if pattern in href or pattern in text:
+        if pattern in href:
             return False
-    
+
     # Follow links that look like opportunities
     opportunity_patterns = [
         "scholarship", "fellowship", "internship", "grant", "competition",
         "hackathon", "summit", "conference", "program", "funded",
         "opportunity", "call for", "apply",
     ]
-    
+
     for pattern in opportunity_patterns:
         if pattern in href or pattern in text:
             return True
-    
-    # Follow category/index pages
+
+    # Follow category/index/pagination pages so we don't get stuck on page 1
     category_patterns = [
         "category", "tag", "opportunities", "programs", "fellowships",
+        "page/", "/page/", "?paged=", "load-more", "/page-",
     ]
-    
+
     for pattern in category_patterns:
         if pattern in href:
             return True
-    
+
+    # Fallback: catch slug-style detail-page URLs that don't contain any of
+    # the keywords above (e.g. "/global-ai-summit-2026" or
+    # "/some-org-research-grant"). These are exactly the links a
+    # keyword-only filter misses, which was a big chunk of the "shallow"
+    # problem.
+    path = urlparse(link["href"]).path.strip("/")
+    segments = [s for s in path.split("/") if s]
+    if segments:
+        last_segment = segments[-1]
+        looks_like_slug = (
+            len(last_segment) > 12
+            and "-" in last_segment
+            and not last_segment.isdigit()
+        )
+        if looks_like_slug:
+            return True
+
     return False
 
 async def agentic_crawl(config: BrowsingConfig) -> List[Dict[str, Any]]:

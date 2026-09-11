@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import requests
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scraper.llm")
