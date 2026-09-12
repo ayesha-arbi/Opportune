@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import requests
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scraper.llm")
@@ -28,7 +28,7 @@ CRITICAL INSTRUCTIONS:
 6. If the content is a guide, advice article, blog post, or informational content (not an actual opportunity with a deadline and application process), return null for all fields to skip extraction.
 """
 
-def extract_opportunity_json(page_text: str, source_url: str, source_name: str, check_title: bool = False, field_tags: List[str] = None) -> Optional[Dict[str, Any]]:
+def extract_opportunity_json(page_text: str, source_url: str, source_name: str, check_title: bool = False, field_tags: list[str] = None) -> Optional[Dict[str, Any]]:
     if field_tags is None:
         field_tags = []
     api_key = os.environ.get("GROQ_API_KEY")

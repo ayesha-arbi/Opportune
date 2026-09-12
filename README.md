@@ -27,10 +27,12 @@
 - **Urgency Aging-Ink Stamps**: Highlights approaching deadlines with visual countdown stamps.
 - **Personalized Notes & Audit Log**: Custom application notes and timestamp tracking per opportunity.
 
-### 4. Automated AI Web Scraping Pipeline
-- **Scheduled Python Pipeline**: Runs via GitHub Actions on a daily cron schedule to discover active hackathons and fellowships from platforms like Devpost and Major League Hacking (MLH).
-- **Strict Pydantic Validation**: Uses AI-based JSON extraction with strict date validation (`deadline`, `start_date`, `end_date`) to prevent date hallucinations.
-- **Safe Upserts & Stale Cleanup**: Deduplicates records on `source_url` and automatically deactivates expired opportunities.
+### 4. Multi-Agent Scraping Pipeline
+- **Message-Passing Architecture**: Specialized agents (Discovery, Extraction, Validation, Deduplication) communicate via typed messages with automatic routing and error handling.
+- **Intelligent Retry Logic**: Exponential backoff retry strategy (1s, 2s, 4s) for resilient AI API calls and network operations.
+- **Real-Time Monitoring**: Comprehensive statistics tracking per agent, automated alerting system (error rate >10%, retry rate >20%, queue backlog >10), and pipeline visualization.
+- **Dual-Mode Execution**: Supports both multi-agent pipeline (USE_MULTI_AGENT_PIPELINE=true) and legacy pipeline for backward compatibility.
+- **Config-Driven Sources**: 7+ aggregator sources (Devpost, MLH, Opportunities Corners, Opportunities Circle, Scholarships Positions, Youth Opportunities, Fully Funded Scholarships) via WordPress REST API and RSS feeds.
 
 ### 5. Skeleton Loading UI
 - **Zero-Flicker Shimmer Placeholders**: Fluid skeleton screens across dashboard, profile, and chat views to ensure a smooth perceived performance.
@@ -43,9 +45,9 @@
 |---|---|
 | **Frontend** | Next.js 15 (App Router, Server Components), React 19, TypeScript, Tailwind CSS, Lucide Icons |
 | **Backend & APIs** | Next.js API Routes, Supabase (PostgreSQL, Row-Level Security, Auth) |
-| **AI & LLM Orchestration** | Groq / OpenRouter API, Function & Tool Calling, Multi-Model Fallback |
+| **AI & LLM Orchestration** | Groq API, Function & Tool Calling, Multi-Model Fallback |
 | **Vector & Search** | PostgreSQL, pgvector (HNSW cosine similarity), Deep multi-pass keyword retrieval |
-| **Scraper Pipeline** | Python 3.11, BeautifulSoup4, Requests, Playwright, Pydantic |
+| **Scraper Pipeline** | Python 3.11, Multi-Agent Architecture, Message Passing, Async/Await, BeautifulSoup4, Requests, Pydantic, Groq API |
 | **Infra & CI/CD** | Vercel (Hosting & Cron), Supabase, GitHub Actions |
 
 ---
@@ -84,11 +86,23 @@ Opportune/
 │   ├── supabase/            # Client, server, and middleware session helpers
 │   └── utils.ts             # Shared validators and date formatters
 ├── scraper/
-│   ├── sources/             # Source crawlers (Devpost, MLH, etc.)
+│   ├── agents/              # Multi-agent pipeline architecture
+│   │   ├── base.py         # Agent base class and message passing
+│   │   ├── discovery_agent.py
+│   │   ├── extraction_agent.py
+│   │   ├── validation_agent.py
+│   │   ├── deduplication_agent.py
+│   │   ├── pipeline.py      # Pipeline orchestrator
+│   │   └── monitoring.py    # Visualization and alerting
+│   ├── sources/             # Source crawlers (Devpost, MLH, WordPress, etc.)
 │   ├── db.py                # Supabase service-role client & upsert engine
 │   ├── llm.py               # AI JSON extractor with anti-hallucination guardrails
 │   ├── schema.py            # Pydantic opportunity validation models
-│   ├── main.py              # CLI entrypoint with summary reporting
+│   ├── config.py            # Source configuration
+│   ├── deduplication.py     # Fuzzy matching and duplicate detection
+│   ├── reliability.py       # Source reliability scoring
+│   ├── notifications.py     # Email notification system
+│   ├── main.py              # CLI entrypoint with dual-mode pipeline
 │   └── requirements.txt     # Python scraper dependencies
 ├── supabase/
 │   └── migrations/          # 001–006 SQL schema, RLS, indexes & vector RPCs
@@ -103,7 +117,7 @@ Opportune/
 - Node.js 20+
 - Python 3.11+
 - Supabase Project & Credentials
-- Groq / OpenRouter API Key
+- Groq API Key
 
 ### 2. Installation
 
@@ -133,12 +147,17 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=openai/gpt-oss-20b
-OPENROUTER_API_KEY=your_openrouter_api_key
+GROQ_MAX_TOKENS=2048
 
 # Optional settings
 CHAT_DAILY_LIMIT=30
 RESEND_API_KEY=your_resend_api_key
+EMAIL_FROM=Opportune <onboarding@resend.dev>
 CRON_SECRET=your_cron_secret
+
+# Scraper Configuration
+RUN_AGENTIC_CRAWLER=false
+USE_MULTI_AGENT_PIPELINE=false
 ```
 
 ### 4. Database Setup
@@ -163,7 +182,11 @@ npm run dev
 # Run TypeScript verification
 npm run typecheck
 
-# Run the Python scraper locally
+# Run the Python scraper (legacy pipeline)
+python -m scraper.main
+
+# Run the Python scraper (multi-agent pipeline)
+export USE_MULTI_AGENT_PIPELINE=true
 python -m scraper.main
 ```
 
